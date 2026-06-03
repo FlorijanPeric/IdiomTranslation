@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Idiom RAG Server</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    }
+    body {
+      margin: 0;
+      max-width: 920px;
+      padding: 24px;
+      margin-inline: auto;
+    }
+    h1 { margin-top: 0; }
+    .card {
+      border: 1px solid #6664;
+      border-radius: 10px;
+      padding: 16px;
+      margin-bottom: 16px;
+    }
+    textarea {
+      width: 100%;
+      min-height: 84px;
+      border-radius: 8px;
+      padding: 10px;
+      font-size: 14px;
+      box-sizing: border-box;
+    }
+    button {
+      border: 0;
+      border-radius: 8px;
+      padding: 10px 14px;
+      cursor: pointer;
+      font-weight: 600;
+    }
+    button.primary { background: #4f46e5; color: #fff; }
+    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
+    .chat {
+      max-height: 420px;
+      overflow: auto;
+      border: 1px solid #6664;
+      border-radius: 10px;
+      padding: 10px;
+      background: #00000008;
+    }
+    .msg {
+      white-space: pre-wrap;
+      border-radius: 8px;
+      padding: 10px;
+      margin: 8px 0;
+    }
+    .user { background: #4f46e522; }
+    .assistant { background: #16a34a22; }
+    .small { font-size: 12px; opacity: 0.85; }
+    .status { font-size: 13px; margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <h1>Idiom RAG Server</h1>
+  <p class="small">Chat with your idiom index and retrain it directly from this page.</p>
+
+  <div class="card">
+    <h3>Chat</h3>
+    <div id="chat" class="chat"></div>
+    <textarea id="message" placeholder="Type an idiom or phrase..."></textarea>
+    <div class="row">
+      <button id="sendBtn" class="primary">Send</button>
+      <button id="clearBtn">Clear Chat</button>
+      <span id="chatStatus" class="status"></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Train / Rebuild Index</h3>
+    <label>
+      <input type="checkbox" id="recreate" />
+      Drop and recreate collection first
+    </label>
+    <div class="row">
+      <button id="trainBtn" class="primary">Run Training</button>
+      <span id="trainStatus" class="status"></span>
+    </div>
+  </div>
+
+  <script>
+    const chatEl = document.getElementById("chat");
+    const messageEl = document.getElementById("message");
+    const chatStatusEl = document.getElementById("chatStatus");
+    const trainStatusEl = document.getElementById("trainStatus");
+    const recreateEl = document.getElementById("recreate");
+
+    /** @type {{role: "user"|"assistant", content: string}[]} */
+    let history = [];
+
+    function renderChat() {
+      chatEl.innerHTML = "";
+      for (const item of history) {
+        const div = document.createElement("div");
+        div.className = `msg ${item.role}`;
+        div.textContent = `${item.role}: ${item.content}`;
+        chatEl.appendChild(div);
+      }
+      chatEl.scrollTop = chatEl.scrollHeight;
+    }
+
+    async function sendMessage() {
+      const message = messageEl.value.trim();
+      if (!message) return;
+      chatStatusEl.textContent = "Sending...";
+
+      history.push({ role: "user", content: message });
+      renderChat();
+      messageEl.value = "";
+
+      try {
+        const response = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message, history }),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(data.detail || "Chat failed");
+        }
+
+        history.push({ role: "assistant", content: data.answer || "No answer" });
+        renderChat();
+        chatStatusEl.textContent = `Done${Array.isArray(data.candidates) ? ` (${data.candidates.length} candidates)` : ""}.`;
+      } catch (error) {
+        history.push({ role: "assistant", content: `Error: ${error.message}` });
+        renderChat();
+        chatStatusEl.textContent = "Error.";
+      }
+    }
+
+    async function trainIndex() {
+      trainStatusEl.textContent = "Training started...";
+      try {
+        const response = await fetch("/api/train", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ recreate_collection: recreateEl.checked }),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(data.detail || "Training failed");
+        }
+        trainStatusEl.textContent = `Done. Indexed rows: ${data.indexed_rows}`;
+      } catch (error) {
+        trainStatusEl.textContent = `Error: ${error.message}`;
+      }
+    }
+
+    document.getElementById("sendBtn").addEventListener("click", sendMessage);
+    document.getElementById("clearBtn").addEventListener("click", () => {
+      history = [];
+      renderChat();
+      chatStatusEl.textContent = "Cleared.";
+    });
+    document.getElementById("trainBtn").addEventListener("click", trainIndex);
+    messageEl.addEventListener("keydown", (event) => {
+      if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+        sendMessage();
+      }
+    });
+  </script>
+</body>
+</html>

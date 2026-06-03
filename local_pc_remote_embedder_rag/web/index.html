@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Local PC RAG</title>
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, sans-serif; }
+    body { margin: 0; padding: 24px; max-width: 900px; margin-inline: auto; }
+    .card { border: 1px solid #6664; border-radius: 10px; padding: 14px; margin-bottom: 14px; }
+    textarea { width: 100%; min-height: 84px; border-radius: 8px; padding: 10px; box-sizing: border-box; }
+    .chat { max-height: 420px; overflow: auto; border: 1px solid #6664; border-radius: 8px; padding: 10px; }
+    .msg { white-space: pre-wrap; border-radius: 8px; padding: 10px; margin: 8px 0; }
+    .user { background: #4338ca22; }
+    .assistant { background: #05966922; }
+    button { border: 0; border-radius: 8px; padding: 9px 12px; cursor: pointer; font-weight: 600; }
+    .primary { background: #4f46e5; color: #fff; }
+    .row { display: flex; gap: 8px; margin-top: 8px; align-items: center; flex-wrap: wrap; }
+    .status { font-size: 13px; opacity: 0.9; }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      border: 1px solid #6666;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .badge.ok { background: #16a34a22; color: #4ade80; }
+    .badge.warn { background: #f59e0b22; color: #fbbf24; }
+    .badge.err { background: #dc262622; color: #f87171; }
+  </style>
+</head>
+<body>
+  <h1 id="pageTitle">Idiom Translator EN → SL</h1>
+  <p>Uses your remote embedder URL + local Qdrant index.</p>
+
+  <div class="card">
+    <h3>0) Direction Toggle</h3>
+    <div class="row">
+      <select id="directionSelect">
+        <option value="en_to_sl">English → Slovene</option>
+        <option value="sl_to_en">Slovene → English</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>1) Embedd (Train / Reindex)</h3>
+    <label><input id="recreate" type="checkbox" /> Recreate collection first</label>
+    <div class="row">
+      <button class="primary" id="trainBtn">Embedd / Train</button>
+      <span id="trainStatus" class="status"></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>2) Give an idiom to translate</h3>
+    <textarea id="idiomInput" placeholder="Example: A bad hair day"></textarea>
+    <textarea id="llmOutput" placeholder="Optional: paste LLM output to post-process translation..."></textarea>
+    <div class="row">
+      <button class="primary" id="translateBtn">Translate</button>
+      <span id="translateStatus" class="status"></span>
+    </div>
+    <div class="chat" id="translateResult"></div>
+  </div>
+
+  <div class="card">
+    <h3>3) Some tools / status</h3>
+    <div class="row">
+      <button id="healthBtn">Refresh Health</button>
+      <button id="testEmbedderBtn">Test Embedder</button>
+      <span id="healthStatus" class="status"></span>
+    </div>
+    <div class="row">
+      <span id="embedderBadge" class="badge warn">Embedder: checking...</span>
+      <span id="qdrantBadge" class="badge warn">Qdrant: checking...</span>
+    </div>
+    <div class="chat" id="healthResult"></div>
+  </div>
+
+  <script>
+    const trainStatus = document.getElementById('trainStatus');
+    const translateStatus = document.getElementById('translateStatus');
+    const translateResult = document.getElementById('translateResult');
+    const healthStatus = document.getElementById('healthStatus');
+    const healthResult = document.getElementById('healthResult');
+    const embedderBadge = document.getElementById('embedderBadge');
+    const qdrantBadge = document.getElementById('qdrantBadge');
+    const testEmbedderBtn = document.getElementById('testEmbedderBtn');
+
+    const pageTitle = document.getElementById('pageTitle');
+    const directionSelect = document.getElementById('directionSelect');
+
+    function updatePageTitle() {
+      const direction = directionSelect.value;
+      pageTitle.textContent = direction === 'en_to_sl' ? 'Idiom Translator EN → SL' : 'Idiom Translator SL → EN';
+    }
+
+    directionSelect.addEventListener('change', updatePageTitle);
+
+    function setBadge(el, kind, text) {
+      el.className = `badge ${kind}`;
+      el.textContent = text;
+    }
+
+    async function trainIndex() {
+      trainStatus.textContent = 'Training...';
+      try {
+        const response = await fetch('/api/train', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            recreate_collection: document.getElementById('recreate').checked,
+            direction: directionSelect.value
+          })
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || 'Training failed');
+        trainStatus.textContent = `Indexed rows: ${data.indexed_rows}`;
+      } catch (error) {
+        trainStatus.textContent = `Error: ${error.message}`;
+      }
+    }
+
+    async function translateIdiom() {
+      const idiom = document.getElementById('idiomInput').value.trim();
+      const llmOutput = document.getElementById('llmOutput').value.trim();
+      if (!idiom) return;
+
+      translateStatus.textContent = 'Translating...';
+      translateResult.textContent = '';
+
+      try {
+        const response = await fetch('/api/translate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            idiom,
+            top_k: 5,
+            llm_output: llmOutput || null,
+            direction: directionSelect.value,
+          })
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || 'Translation failed');
+
+        const candidates = Array.isArray(data.candidates) ? data.candidates : [];
+        const topText = candidates
+          .slice(0, 5)
+          .map((item, index) => `${index + 1}. [${item.score?.toFixed ? item.score.toFixed(4) : item.score}] ${item.idiom} -> ${item.translation}`)
+          .join('\n');
+
+        translateResult.textContent =
+          `Best translation: ${data.best_translation || '-'}\n` +
+          `Postprocessed translation: ${data.postprocessed_translation || '-'}\n\n` +
+          `Details:\n${data.answer || ''}\n\n` +
+          `Top matches:\n${topText}`;
+        translateStatus.textContent = 'Done';
+      } catch (error) {
+        translateStatus.textContent = `Error: ${error.message}`;
+      }
+    }
+
+    async function refreshHealth() {
+      healthStatus.textContent = 'Checking...';
+      healthResult.textContent = '';
+      try {
+        const response = await fetch('/api/health');
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || 'Health failed');
+        healthResult.textContent = JSON.stringify(data, null, 2);
+        healthStatus.textContent = 'OK';
+        const embedderText = data.embedder_token_set ? 'Embedder: configured' : 'Embedder: missing token';
+        setBadge(embedderBadge, data.embedder_url ? 'ok' : 'err', `${embedderText} | ${data.embedder_model || '-'}`);
+        const direction = directionSelect.value;
+        const selected = data.collections?.[direction];
+        if (selected) {
+          const label = direction === 'en_to_sl' ? 'Qdrant EN→SL' : 'Qdrant SL→EN';
+          setBadge(qdrantBadge, selected.exists ? 'ok' : 'warn', selected.exists ? `${label}: ${selected.name}` : `${label}: collection missing`);
+        } else {
+          setBadge(qdrantBadge, data.collection_exists ? 'ok' : 'warn', data.collection_exists ? `Qdrant: ${data.collection}` : 'Qdrant: collection missing');
+        }
+      } catch (error) {
+        healthStatus.textContent = `Error: ${error.message}`;
+        setBadge(embedderBadge, 'err', 'Embedder: error');
+        setBadge(qdrantBadge, 'err', 'Qdrant: error');
+      }
+    }
+
+    async function testEmbedder() {
+      healthStatus.textContent = 'Testing embedder...';
+      try {
+        const response = await fetch('/api/test-embedder', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sample_text: 'A bad hair day' })
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || 'Embedder test failed');
+        healthResult.textContent = JSON.stringify(data, null, 2);
+        healthStatus.textContent = `OK: vector dimension ${data.vector_dimension}`;
+        setBadge(embedderBadge, 'ok', `Embedder: ok | ${data.embedder_model || '-'}`);
+      } catch (error) {
+        healthStatus.textContent = `Error: ${error.message}`;
+        setBadge(embedderBadge, 'err', 'Embedder: error');
+      }
+    }
+
+    document.getElementById('trainBtn').addEventListener('click', trainIndex);
+    document.getElementById('translateBtn').addEventListener('click', translateIdiom);
+    document.getElementById('healthBtn').addEventListener('click', refreshHealth);
+    testEmbedderBtn.addEventListener('click', testEmbedder);
+    document.getElementById('idiomInput').addEventListener('keydown', (event) => {
+      if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') translateIdiom();
+    });
+
+    updatePageTitle();
+    refreshHealth();
+  </script>
+</body>
+</html>
